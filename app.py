@@ -3,11 +3,10 @@ import re
 import pdfplumber
 import requests
 
-# App Configuration
 st.set_page_config(page_title="FMCSA Email Extractor", layout="wide")
 
 st.title("🚛 FMCSA PDF Email Extractor")
-st.write("پی ڈی ایف اپ لوڈ کریں اور سٹیٹس کے مطابق کیریئرز اور بروکرز کی ای میلز نکالیں۔")
+st.write("پی ڈی ایف اپ لوڈ کریں اور اسٹیٹس کے مطابق کیریئرز اور بروکرز کی ای میلز نکالیں۔")
 
 def extract_data_from_pdf(pdf_file):
     extracted_records = []
@@ -19,52 +18,58 @@ def extract_data_from_pdf(pdf_file):
             lines = text.split('\n')
             current_category = "Carrier"
             for line in lines:
-                if "Broker of" in line:
+                if "BROKER OF" in line.upper():
                     current_category = "Broker"
-                elif "Motor Carrier of" in line or "Freight Forwarder" in line:
+                elif "MOTOR CARRIER OF" in line.upper() or "FREIGHT FORWARDER" in line.upper():
                     current_category = "Carrier"
                 
-                dot_match = re.search(r'USDOT\s*#?\s*(\d+)', line, re.IGNORECASE)
-                mc_match = re.search(r'MC-\d+', line, re.IGNORECASE)
+                # USDOT یا MC نمبر تلاش کرنا
+                dot_match = re.search(r'(?:USDOT|MC|FF)\s*[-#]?\s*(\d+)', line, re.IGNORECASE)
                 
                 if dot_match:
-                    dot_num = dot_match.group(1)
+                    num = dot_match.group(1)
                     extracted_records.append({
                         'type': current_category,
-                        'dot': dot_num,
-                        'mc': mc_match.group(0) if mc_match else None
+                        'id': num
                     })
     return extracted_records
 
-def fetch_fmcsa_details(dot_number):
+def fetch_fmcsa_details(id_number):
     try:
-        url = f"https://mobile.fmcsa.dot.gov/qc/services/carriers/{dot_number}?webKey=YOUR_API_KEY"
-        response = requests.get(url, timeout=5)
+        # FMCSA API Endpoint with Active WebKey
+        url = f"https://mobile.fmcsa.dot.gov/qc/services/carriers/{id_number}?webKey=c323f46f4eb27eb294e75cb70d65427d1a5bf068"
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        response = requests.get(url, headers=headers, timeout=5)
+        
         if response.status_code == 200:
             data = response.json()
             carrier = data.get('content', {}).get('carrier', {})
-            email = carrier.get('emailAddress', None)
-            statusCode = carrier.get('allowedToOperate', 'Inactive') 
             
-            if statusCode == 'Y':
-                status = 'Active'
-            elif statusCode == 'N':
-                status = 'Inactive'
-            elif 'Pending' in statusCode:
-                status = 'Pending'
-            else:
-                status = 'Rejected'
-            return email, status
+            if carrier:
+                email = carrier.get('emailAddress')
+                allowed = carrier.get('allowedToOperate', 'N')
+                
+                # اسٹیٹس چیک کریں
+                if allowed == 'Y':
+                    status = 'Active'
+                elif allowed == 'N':
+                    status = 'Inactive'
+                elif 'P' in str(allowed):
+                    status = 'Pending'
+                else:
+                    status = 'Rejected'
+                    
+                if email and "@" in email and email.lower() != "none":
+                    return email.strip(), status
     except Exception:
         pass
-    return None, "Inactive"
+    return None, None
 
-# File Uploader
 uploaded_file = st.file_uploader("پی ڈی ایف فائل یہاں اپ لوڈ کریں", type=["pdf"])
 
 if uploaded_file is not None:
     if st.button("Extract Emails"):
-        with st.spinner("پی ڈی ایف پروسیس ہو رہی ہے، براہ کرم انتظار کریں..."):
+        with st.spinner("پی ڈی ایف سے ڈیٹا نکالا جا رہا ہے، براہ کرم انتظار کریں..."):
             records = extract_data_from_pdf(uploaded_file)
             
             results = {
@@ -72,14 +77,20 @@ if uploaded_file is not None:
                 'Carriers': {'Active': [], 'Inactive': [], 'Pending': [], 'Rejected': []}
             }
             
-            for record in records:
-                email, status = fetch_fmcsa_details(record['dot'])
+            progress_bar = st.progress(0)
+            total = len(records)
+            
+            for index, record in enumerate(records):
+                email, status = fetch_fmcsa_details(record['id'])
                 category = 'Brokers' if record['type'] == 'Broker' else 'Carriers'
                 
-                if email and email != 'No Email Found':
+                if email and status:
                     results[category][status].append(email)
+                
+                if total > 0:
+                    progress_bar.progress((index + 1) / total)
             
-            # Remove Duplicates
+            # ڈوپلیکیٹ ای میلز ختم کرنا
             for cat in results:
                 for st_key in results[cat]:
                     results[cat][st_key] = list(set(results[cat][st_key]))
@@ -87,11 +98,9 @@ if uploaded_file is not None:
             st.session_state['results'] = results
             st.success("پروسیسنگ مکمل ہو گئی ہے!")
 
-# Display Results
 if 'results' in st.session_state:
     results = st.session_state['results']
     
-    # Category Tabs
     main_tab1, main_tab2 = st.tabs(["🚛 Carriers Emails", "🏢 Brokers Emails"])
     
     def display_status_sections(category_name):
@@ -106,14 +115,14 @@ if 'results' in st.session_state:
                 if emails:
                     email_str = "\n".join(emails)
                     st.text_area(
-                        label=f"{status} ای میلز کی لسٹ:", 
+                        label="ای میل لسٹ:", 
                         value=email_str, 
-                        height=200, 
+                        height=250, 
                         key=f"{category_name}_{status}_text"
                     )
-                    st.info("💡 تمام ای میلز کاپی کرنے کے لیے اوپر دیے گئے باکس کے اوپر کونے میں 'Copy' ائیکن پر کلک کریں یا آل سلیکٹ کریں۔")
+                    st.info("💡 ای میلز کاپی کرنے کے لیے اوپر والے باکس کے دائیں کونے میں دیے گئے Copy آئیکن پر کلک کریں۔")
                 else:
-                    st.warning("کوئی ای میل نہیں ملی۔")
+                    st.warning("اس کیٹیگری میں کوئی ای میل نہیں ملی۔")
 
     with main_tab1:
         display_status_sections('Carriers')
